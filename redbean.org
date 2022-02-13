@@ -1,0 +1,683 @@
+REDBEAN.plerno -*- mode: org -*-
+
+* SQL
+#+name: create_boards_sql
+#+header: :db dev.db
+#+begin_src sqlite
+CREATE TABLE IF NOT EXISTS boards (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  description TEXT,
+  created_user TEXT,
+  created_dttm TEXT,
+  updated_user TEXT,
+  updated_dttm TEXT,
+  delete_flg TEXT
+)
+#+end_src
+
+
+#+name: create_topics_sql
+#+header: :db dev.db
+#+begin_src sqlite
+CREATE TABLE IF NOT EXISTS topics (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  description TEXT,
+  board_id INTEGER,
+  created_user TEXT,
+  created_dttm TEXT,
+  updated_user TEXT,
+  updated_dttm TEXT,
+  delete_flg TEXT
+)
+#+end_src
+
+
+#+name: create_posts_sql
+#+header: :db dev.db
+#+begin_src sqlite
+CREATE TABLE IF NOT EXISTS posts (
+  id INTEGER PRIMARY KEY,
+  name TEXT,
+  description TEXT,
+  topic_id INTEGER,
+  parent_post_id INTEGER,
+  created_user TEXT,
+  created_dttm TEXT,
+  updated_user TEXT,
+  updated_dttm TEXT,
+  delete_flg TEXT
+)
+#+end_src
+
+
+#+name: delete_boards_sql
+#+begin_src sqlite
+DELETE FROM boards
+#+end_src
+
+* update_redbean
+** update_redbean.py
+
+#+name: update_redbean.py
+#+begin_src python :tangle update_redbean.py
+import os
+
+excludes = {'.py', '.com', '.zip', '.db', '__pycache__'}
+
+def recurse_filetree(fp):
+    for file in os.listdir(fp):
+        if all(x not in file for x in excludes):
+            command = f"zip redbean.zip {fp + file}"
+            print(command)
+            print(os.system(command))
+            if '.' not in file[1:]:
+                recurse_filetree(fp + file + '/')
+recurse_filetree('./')
+#+end_src
+   
+* Lua
+** .init.lua
+
+#+name: .init.lua
+#+begin_src lua :tangle .init.lua :noweb yes
+mymodule = require "mymodule"
+sqlite3 = require "lsqlite3"
+json = require "json"
+
+-- /.init.lua is loaded at startup in redbean's main process
+HidePath('/usr/share/zoneinfo/')
+HidePath('/usr/share/ssl/')
+
+-- open a browser tab using explorer/open/xdg-open
+-- LaunchBrowser('/tool/net/demo/index.html')
+
+-- sql database (see sql.lua)
+-- db = sqlite3.open('chan.db')
+db = sqlite3.open_memory()
+
+db:exec[[
+<<create_boards_sql>>;
+<<create_topics_sql>>;
+<<create_posts_sql>>;
+]]
+
+-- this intercepts all requests if it's defined
+function OnHttpRequest()
+   if HasParam('magic') then
+      Write('<p>\r\n')
+      Write('OnHttpRequest() has intercepted your request<br>\r\n')
+      Write('because you specified the magic parameter\r\n')
+      Write('<pre>\r\n')
+      Write(EscapeHtml(LoadAsset('/.init.lua')))
+      Write('</pre>\r\n')
+   else
+      Route() -- this asks redbean to do the default thing
+   end
+   SetHeader('Server', 'redbean!')
+end
+#+end_src
+   
+** api
+*** boards
+#+begin_src lua :tangle api/boards.lua
+method = GetMethod()
+
+function parseBoard(row)
+   board = {id=row.id,
+            name=row.name,
+            description=row.description,
+            created_user=row.created_user,
+            created_dttm=row.created_dttm,
+            updated_user=row.updated_user,
+            updated_dttm=row.updated_dttm,
+            delete_flg=row.delete_flg}
+   return board
+end
+
+if method == "GET" then
+   results = {}
+   if HasParam("id") then
+      id = GetParam("id")
+      for row in db:nrows("SELECT * from boards where delete_flg=0 and id='" .. id .. "'") do
+         results = parseBoard(row)
+      end
+   else
+      for row in db:nrows("SELECT * from boards where delete_flg=0") do
+         board = parseBoard(row)
+         results[#results+1] = board
+      end
+   end
+   Write(json.encode(results))
+
+elseif method == "POST" then
+   name = GetParam("name")
+   description = GetParam("description")
+   user = GetParam("user")
+   sql = [[
+    INSERT INTO boards (name, description, created_user, created_dttm,
+                        updated_user, updated_dttm, delete_flg)
+      VALUES (']] .. name .. [['
+            , ']] .. description .. [['
+            , ']] .. user .. [['
+            , datetime('now')
+            , ']] .. user .. [['
+            , datetime('now'), 0)]]
+            db:exec(sql)
+            Write(db:last_insert_rowid())
+
+elseif method == "PUT" then
+   id = GetParam("id")
+   name = GetParam("name")
+   description = GetParam("description")
+   user = GetParam("user")
+   sql = [[UPDATE boards set name=']] .. name ..[['
+          , description=']] .. description .. [['
+          , updated_user=']] .. user .. [['
+          , updated_dttm=datetime('now')
+          where id=]] .. id
+          db:exec(sql)
+
+elseif method == "DELETE" then
+   if HasParam("id") then
+      id = GetParam("id")
+      sql = [[UPDATE boards set name='updated', delete_flg=1 where id=]] .. id
+   else
+      sql = [[DELETE from boards]]
+   end
+   db:exec(sql)
+end
+#+end_src
+
+
+*** topics
+
+#+begin_src lua :tangle api/topics.lua
+method = GetMethod()
+
+function parseTopic(row)
+   topic = {id=row.id,
+            name=row.name,
+            description=row.description,
+            board_id=row.board_id,
+            created_user=row.created_user,
+            created_dttm=row.created_dttm,
+            updated_user=row.updated_user,
+            updated_dttm=row.updated_dttm,
+            delete_flg=row.delete_flg}
+   return topic
+end
+
+if method == "GET" then
+   results = {}
+   if HasParam("id") then
+      id = GetParam("id")
+      for row in db:nrows("SELECT * from topics where delete_flg=0 and id='" .. id .. "'") do
+         results = parseTopic(row)
+      end
+   elseif HasParam("board_id") then
+      board_id = GetParam("board_id")
+      for row in db:nrows("SELECT * from topics where delete_flg=0 and board_id='" .. board_id .. "'") do
+         topic = parseTopic(row)
+         results[#results+1] = topic
+      end
+   else
+      for row in db:nrows("SELECT * from topics where delete_flg=0") do
+         topic = parseTopic(row)
+         results[#results+1] = topic
+      end
+   end
+   Write(json.encode(results))
+
+elseif method == "POST" then
+   name = GetParam("name")
+   description = GetParam("description")
+   board_id = GetParam("board_id")
+   user = GetParam("user")
+   sql = [[
+    INSERT INTO topics (name, description, board_id, created_user, created_dttm,
+                        updated_user, updated_dttm, delete_flg)
+      VALUES (']] .. name .. [['
+            , ']] .. description .. [['
+            , ']] .. board_id .. [['
+            , ']] .. user .. [['
+            , datetime('now')
+            , ']] .. user .. [['
+            , datetime('now'), 0)]]
+            db:exec(sql)
+            Write(db:last_insert_rowid())
+
+elseif method == "PUT" then
+   id = GetParam("id")
+   name = GetParam("name")
+   description = GetParam("description")
+   board_id = GetParam("board_id")
+   user = GetParam("user")
+   sql = [[UPDATE topics set name=']] .. name ..[['
+          , description=']] .. description .. [['
+          , board_id=']] .. board_id .. [['
+          , updated_user=']] .. user .. [['
+          , updated_dttm=datetime('now')
+          where id=]] .. id
+          db:exec(sql)
+
+elseif method == "DELETE" then
+   if HasParam("id") then
+      id = GetParam("id")
+      sql = [[UPDATE topics set name='updated', delete_flg=1 where id=]] .. id
+   else
+      sql = [[DELETE from topics]]
+   end
+   db:exec(sql)
+end
+#+end_src
+
+*** posts
+
+#+begin_src lua :tangle api/posts.lua
+method = GetMethod()
+
+function parsePost(row)
+   post  = {id=row.id,
+            name=row.name,
+            description=row.description,
+            topic_id=row.topic_id,
+            parent_post_id=row.parent_post_id,
+            created_user=row.created_user,
+            created_dttm=row.created_dttm,
+            updated_user=row.updated_user,
+            updated_dttm=row.updated_dttm,
+            delete_flg=row.delete_flg}
+   return post
+end
+
+if method == "GET" then
+   results = {}
+   if HasParam("id") then
+      id = GetParam("id")
+      for row in db:nrows("SELECT * from posts where delete_flg=0 and id='" .. id .. "'") do
+         results = parsePost(row)
+      end
+   elseif HasParam("topic_id") then
+      board_id = GetParam("topic_id")
+      for row in db:nrows("SELECT * from posts where delete_flg=0 and topic_id='" .. board_id .. "'") do
+         post = parsePost(row)
+         results[#results+1] = post
+      end
+   else
+      for row in db:nrows("SELECT * from posts where delete_flg=0") do
+         post = parseTopic(row)
+         results[#results+1] = post
+      end
+   end
+   Write(json.encode(results))
+
+elseif method == "POST" then
+   name = GetParam("name")
+   description = GetParam("description")
+   topic_id = GetParam("topic_id")
+   parent_post_id = GetParam("parent_post_id")
+   user = GetParam("user")
+   sql = [[
+    INSERT INTO posts (name, description, topic_id, parent_post_id, created_user, created_dttm,
+                        updated_user, updated_dttm, delete_flg)
+      VALUES (']] .. name .. [['
+            , ']] .. description .. [['
+            , ]] .. topic_id .. [[
+            , ]] .. parent_post_id .. [[
+            , ']] .. user .. [['
+            , datetime('now')
+            , ']] .. user .. [['
+            , datetime('now'), 0)]]
+            db:exec(sql)
+            Write(db:last_insert_rowid())
+
+elseif method == "PUT" then
+   id = GetParam("id")
+   name = GetParam("name")
+   description = GetParam("description")
+   topic_id = GetParam("topic_id")
+   parent_post_id = GetParam("parent_post_id")
+   user = GetParam("user")
+   sql = [[UPDATE posts set name=']] .. name ..[['
+          , description=']] .. description .. [['
+          , topic_id=]] .. topic_id .. [[
+          , parent_post_id=]] .. parent_post_id .. [[ 
+          , updated_user=']] .. user .. [['
+          , updated_dttm=datetime('now')
+          where id=]] .. id
+          db:exec(sql)
+
+elseif method == "DELETE" then
+   if HasParam("id") then
+      id = GetParam("id")
+      sql = [[UPDATE posts set delete_flg=1 where id=]] .. id
+   else
+      sql = [[DELETE from posts]]
+   end
+   db:exec(sql)
+end
+#+end_src
+
+* Testing
+
+** TODO update this to check if redbean is already running on port and only start it if it isn't!
+** TODO update redbean_test before running it. Will need to refactor update_rebean.py to take redbean fp as argument.
+** TODO truncate boards table before running tests
+
+#+name: test_redbean
+#+begin_src python :tangle test_redbean.py :noweb yes
+
+import pytest
+import sqlite3
+import os
+import psutil
+import time
+import requests
+import logging
+from update_redbean import recurse_filetree
+
+
+redbean_fp = 'redbean.zip'
+suppress_logs = False
+port = 5000
+kill_after = False
+url = f'http://localhost:{port}'
+
+
+@pytest.fixture(scope='session', autouse=True)
+def redbean():
+
+    global url
+    # pid = None
+    log_cmd = 'i>/dev/null 2>' if suppress_logs else ''
+    # os.system(f"cp {redbean_fp} redbean_test.zip")
+    # os.system(f"mv .init.lua .tmp.init.lua")
+    # os.system(f"unzip redbean_test.zip .init.lua -d ./ {log_cmd}")
+    # with open('.init.lua', 'r') as f:
+    #     init_lua = f.read()
+    # init_lua = init_lua.replace('db = sqlite3.open_memory(',
+    #                             'db = sqlite3.open(\'redbean.test.db\')\n-- db = sqlite.open_memory(')
+    # init_lua = init_lua.replace('db = sqlite3.open(',
+    #                             'db = sqlite3.open_memory()\n-- sqlite3.open(')
+    # with open('.init.lua', 'w') as f:
+    #     f.write(init_lua)
+    # os.system(f"zip redbean_test.zip .init.lua {log_cmd}")
+    start_cmd = f'./redbean.zip -p {port} {log_cmd} &'
+    # pid = None
+    try:
+        recurse_filetree('./')
+        os.system(start_cmd)
+        time.sleep(3)
+    #     res = requests.get(url + '/api/boards.lua')
+    #     logging.info(u'Started redbean.\n{url}')
+    #     for proc in psutil.process_iter():
+    #         if 'redbean.zip' in proc.name():
+    #             pid = proc.pid
+    #             print(pid)
+
+    #     print(res.content)
+    #     json = res.json()
+    #     print(res.json())
+    #     assert len(json) == 0
+    except:
+        logging.exception("""\nUnable to start redbean. 
+        Probably that it is b/c it's already running, so we will continue running the tests.\n""")
+    #     pass
+    ## end setup
+
+    ## truncate tables
+    # os.system('touch redbean.test.db')
+    # cnxn = sqlite3.connect('redbean.test.db')
+    # cur = cnxn.cursor()
+        # create tables if they don't already exist
+    # cur.execute('''
+    # <<create_boards_sql>>
+    # ''')
+        # truncate
+    # cur.execute('''
+    # <<delete_boards_sql>>
+    # ''')
+    # cur.close()
+    # cnxn.commit()
+    # cnxn.close()
+    ## end truncate tables
+
+
+    yield url
+
+
+    # tear down
+    # if kill_after and pid:
+    #     try:
+    #        os.system(f'kill -9 {pid}')
+    #    except:
+    #        logging.exception('kill failed\n')
+    # os.system('rm redbean_test.zip .init.lua')
+    # os.system('mv .tmp.init.lua .init.lua')
+
+
+def test_create_board_1(redbean):
+    res = requests.post(redbean + '/api/boards.lua', data=dict(
+        name='b1',
+        description='d1',
+        user='user'
+    ))
+    assert res.content == b'1'
+
+
+def test_create_board_2(redbean):
+    res = requests.post(redbean + '/api/boards.lua', data=dict(
+        name='b2',
+        description='d2',
+        user='user'
+    ))
+    assert res.content == b'2'
+
+
+def test_get_boards(redbean):
+    res = requests.get(redbean + '/api/boards.lua')
+    print(res.json())
+    json = res.json()
+    assert len(json) == 2
+
+    
+def test_get_board(redbean):
+    res = requests.get(redbean + '/api/boards.lua?id=1')
+    print(res.json())
+    json = res.json()
+    assert 'id' in json and 'name' in json and json['id']==1
+
+
+def test_update_board(redbean):
+    res = requests.put(redbean + '/api/boards.lua?id=1', data=dict(
+        name = 'b2-update',
+        description = 'd2-update',
+        user = 'user-update'
+    ))
+    res = requests.get(redbean + '/api/boards.lua?id=1')
+    json = res.json()
+    print(json)
+    assert json['name']=='b2-update'\
+           and json['description']=='d2-update'\
+           and json['updated_user']=='user-update'\
+           and json['id']==1
+
+
+    
+def test_create_topic_1(redbean):
+    res = requests.post(redbean + '/api/topics.lua', data=dict(
+        name='t1',
+        description='td1',
+        user='user',
+        board_id=1
+    ))
+    assert res.content == b'1'
+
+
+def test_create_topic_2(redbean):
+    res = requests.post(redbean + '/api/topics.lua', data=dict(
+        name='t2',
+        description='td2',
+        user='user',
+        board_id=2
+    ))
+    assert res.content == b'2'
+
+
+def test_get_topics(redbean):
+    res = requests.get(redbean + '/api/topics.lua')
+    print(res.json())
+    json = res.json()
+    assert len(json) == 2
+
+
+def test_get_topics_by_board(redbean):
+    res = requests.get(redbean + '/api/topics.lua?board_id=2')
+    print(res.json())
+    json = res.json()
+    assert len(json) == 1
+    assert json[0]['board_id']==2
+
+    
+def test_get_topic(redbean):
+    res = requests.get(redbean + '/api/topics.lua?id=1')
+    print(res.json())
+    json = res.json()
+    assert 'id' in json and 'name' in json and json['id']==1
+
+
+def test_update_topic(redbean):
+    res = requests.put(redbean + '/api/topics.lua?id=1', data=dict(
+        name = 't2-update',
+        description = 'td2-update',
+        user = 'user-update',
+        board_id = 3
+    ))
+    res = requests.get(redbean + '/api/topics.lua?id=1')
+    json = res.json()
+    print(json)
+    assert json['name']=='t2-update'\
+           and json['description']=='td2-update'\
+           and json['updated_user']=='user-update'\
+           and json['id']==1\
+           and json['board_id']==3
+
+    
+def test_create_post_1(redbean):
+    res = requests.post(redbean + '/api/posts.lua', data=dict(
+        name='p1',
+        description='pd1',
+        user='user',
+        topic_id=1,
+        parent_post_id='null'
+    ))
+    assert res.content == b'1'
+
+
+def test_create_post_2(redbean):
+    res = requests.post(redbean + '/api/posts.lua', data=dict(
+        name='p2',
+        description='pd2',
+        user='user',
+        topic_id=2,
+        parent_post_id=1
+    ))
+    assert res.content == b'2'
+
+
+def test_get_posts(redbean):
+    res = requests.get(redbean + '/api/posts.lua')
+    print(res.json())
+    json = res.json()
+    assert len(json) == 2
+
+
+def test_get_posts_by_topic(redbean):
+    res = requests.get(redbean + '/api/posts.lua?topic_id=2')
+    print(res.json())
+    json = res.json()
+    assert len(json) == 1
+    assert json[0]['topic_id']==2
+
+    
+def test_get_post(redbean):
+    res = requests.get(redbean + '/api/posts.lua?id=1')
+    print(res.json())
+    json = res.json()
+    assert 'id' in json and 'name' in json and json['id']==1\
+           and ('parent_post_id' not in json or json['parent_post_id']==None)
+
+
+def test_update_post(redbean):
+    res = requests.put(redbean + '/api/posts.lua?id=1', data=dict(
+        name = 'p2-update',
+        description = 'pd2-update',
+        user = 'user-update',
+        topic_id = 3,
+        parent_post_id = 5
+    ))
+    res = requests.get(redbean + '/api/posts.lua?id=1')
+    json = res.json()
+    print(json)
+    assert json['name']=='p2-update'\
+           and json['description']=='pd2-update'\
+           and json['updated_user']=='user-update'\
+           and json['id']==1\
+           and json['topic_id']==3\
+           and json['parent_post_id']==5
+    
+
+def test_delete_post(redbean):
+    res = requests.delete(redbean + '/api/posts.lua?id=1')
+    res = requests.get(redbean + '/api/posts.lua')
+    json = res.json()
+    print(json)
+    assert len(json)==1
+
+    
+def test_delete_posts(redbean):
+    res = requests.delete(redbean + '/api/posts.lua')
+    res = requests.get(redbean + '/api/posts.lua')
+    json = res.json()
+    assert len(json) == 0
+
+    
+def test_delete_topic(redbean):
+    res = requests.delete(redbean + '/api/topics.lua?id=1')
+    res = requests.get(redbean + '/api/topics.lua')
+    json = res.json()
+    print(json)
+    assert len(json)==1
+
+    
+def test_delete_topics(redbean):
+    res = requests.delete(redbean + '/api/topics.lua')
+    res = requests.get(redbean + '/api/topics.lua')
+    json = res.json()
+    assert len(json) == 0
+
+
+def test_delete_board(redbean):
+    res = requests.delete(redbean + '/api/boards.lua?id=1')
+    res = requests.get(redbean + '/api/boards.lua')
+    json = res.json()
+    print(json)
+    assert len(json)==1
+
+    
+def test_delete_boards(redbean):
+    res = requests.delete(redbean + '/api/boards.lua')
+    res = requests.get(redbean + '/api/boards.lua')
+    json = res.json()
+    assert len(json) == 0
+    
+#+end_src
+
+#+RESULTS: test_redbean
+: None
+
+#+RESULTS:
+
+
